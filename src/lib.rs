@@ -18,7 +18,7 @@ extern crate mio_named_pipes;
 extern crate winapi;
 
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use futures::{Async, Poll};
 use futures::stream::Stream;
@@ -31,15 +31,21 @@ use bytes::{BufMut, Buf};
 use tokio_named_pipes::NamedPipe;
 
 /// For testing/examples
-pub fn dummy_endpoint() -> String {
+pub fn dummy_endpoint() -> PathBuf {
     extern crate rand;
 
+    #[cfg(windows)]
+    let dir = Path::new(r"\\.\pipe");
+    #[cfg(not(windows))]
+    let dir = Path::new("/tmp");
+
     let num: u64 = rand::Rng::gen(&mut rand::thread_rng());
-    if cfg!(windows) {
-        format!(r"\\.\pipe\my-pipe-{}", num)
-    } else {
-        format!(r"/tmp/my-uds-{}", num)
-    }
+    #[cfg(windows)]
+    let filename = format!("my-pipe-{}", num);
+    #[cfg(not(windows))]
+    let filename = format!("my-uds-{}", num);
+
+    dir.join(filename)
 }
 
 /// Endpoint for IPC transport
@@ -65,7 +71,7 @@ pub fn dummy_endpoint() -> String {
 /// }
 /// ```
 pub struct Endpoint {
-    _path: String,
+    _path: PathBuf,
     _handle: Handle,
     #[cfg(not(windows))]
     inner: tokio_uds::UnixListener,
@@ -75,32 +81,38 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Stream of incoming connections
-    #[cfg(not(windows))]
     pub fn incoming(self) -> Incoming {
-        Incoming { inner: self.inner.incoming() }
-    }
-
-    /// Stream of incoming connections    
-    #[cfg(windows)]
-    pub fn incoming(self) -> Incoming {
-        Incoming { inner: NamedPipeSupport { path: self._path, handle: self._handle.remote().clone(), pipe: self.inner } }
+        #[cfg(not(windows))]
+        {
+            Incoming { inner: self.inner.incoming() }
+        }
+        #[cfg(windows)]
+        {
+            Incoming {
+                inner: NamedPipeSupport {
+                    path: self._path,
+                    handle: self._handle.remote().clone(),
+                    pipe: self.inner
+                }
+            }
+        }
     }
 
     /// Inner platform-dependant state of the endpoint
     #[cfg(windows)]
-    fn inner(p: &str, handle: &Handle) -> io::Result<NamedPipe> {
+    fn inner(p: &Path, handle: &Handle) -> io::Result<NamedPipe> {
         NamedPipe::new(p, handle)
     }
 
     /// Inner platform-dependant state of the endpoint
     #[cfg(not(windows))]
-    fn inner(p: &str, handle: &Handle) -> io::Result<tokio_uds::UnixListener> {
+    fn inner(p: &Path, handle: &Handle) -> io::Result<tokio_uds::UnixListener> {
         tokio_uds::UnixListener::bind(p, handle)
     }
 
     /// New IPC endpoint at the given path
     /// Endpoint ready to accept connections immediately
-    pub fn new(path: String, handle: &Handle) -> io::Result<Self> {
+    pub fn new(path: PathBuf, handle: &Handle) -> io::Result<Self> {
         Ok(Endpoint { 
             inner: Self::inner(&path, handle)?,
             _path: path, 
@@ -114,7 +126,7 @@ pub struct RemoteId;
 
 #[cfg(windows)]
 struct NamedPipeSupport {
-    path: String,
+    path: PathBuf,
     handle: tokio_core::reactor::Remote,
     pipe: NamedPipe,    
 }
@@ -290,24 +302,25 @@ mod tests {
     use futures::{Stream, Future};
     use futures::sync::oneshot;
     use std::thread;
+    use std::path::{Path, PathBuf};
 
     use super::Endpoint;
     use super::IpcConnection;
 
-    #[cfg(not(windows))]
-    fn random_pipe_path() -> String {
+    fn random_pipe_path() -> PathBuf {
         let num: u64 = self::rand::Rng::gen(&mut rand::thread_rng());
-        format!(r"/tmp/parity-tokio-ipc-test-pipe-{}", num)
+        #[cfg(not(windows))]
+        {
+            Path::new("/tmp").join(format!("parity-tokio-ipc-test-pipe-{}", num))
+        }
+        #[cfg(windows)]
+        {
+            Path::new(r"\\.\pipe").join(format!("my-pipe-{}", num))
+        }
+
     }
 
-    #[cfg(windows)]
-    fn random_pipe_path() -> String {
-        let num: u64 = self::rand::Rng::gen(&mut rand::thread_rng());
-        format!(r"\\.\pipe\my-pipe-{}", num)
-    }
-
-    fn run_server(path: &str) {
-        let path = path.to_owned();
+    fn run_server(path: PathBuf) {
         let (ok_signal, ok_rx) = oneshot::channel();
         thread::spawn(|| {
             let mut core = Core::new().expect("failed to spawn an event loop");
@@ -334,7 +347,7 @@ mod tests {
     #[test]
     fn smoke_test() {
         let path = random_pipe_path();
-        run_server(&path);
+        run_server(path.clone());
         let mut core = Core::new().expect("failed to spawn an event loop");
         let handle = core.handle();
 
